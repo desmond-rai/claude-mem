@@ -128,14 +128,27 @@ The OpenRouter provider is a generic OpenAI-compatible client. Set `CLAUDE_MEM_O
 
 ### DeepSeek
 
+Keep the API key in Claude-Mem's credential file, not in `settings.json`:
+
 ```json
 {
   "CLAUDE_MEM_PROVIDER": "openrouter",
   "CLAUDE_MEM_OPENROUTER_BASE_URL": "https://api.deepseek.com",
-  "CLAUDE_MEM_OPENROUTER_MODEL": "deepseek-chat",
-  "CLAUDE_MEM_OPENROUTER_API_KEY": "YOUR_DEEPSEEK_API_KEY"
+  "CLAUDE_MEM_OPENROUTER_MODEL": "deepseek-v4-flash",
+  "CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES": "20"
 }
 ```
+
+```bash
+# ~/.claude-mem/.env
+OPENROUTER_API_KEY=YOUR_DEEPSEEK_API_KEY
+chmod 600 ~/.claude-mem/.env
+```
+
+DeepSeek's disk context cache is automatic. Claude-Mem preserves the stable
+observer prompt while retaining only the newest conversation turns, which
+keeps the reusable prefix and prevents request history from growing without
+bound.
 
 ### LM Studio (local model)
 
