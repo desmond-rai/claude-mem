@@ -197,6 +197,8 @@ export async function processAgentResponse(
       ...compressionProps,
       tokens_input: usage?.input,
       tokens_output: usage?.output,
+      cache_hit_tokens: usage?.cacheHit,
+      cache_miss_tokens: usage?.cacheMiss,
       cost_usd: usage?.costUsd,
       // input > 0 guard: a gateway that reports output without input must not
       // produce a literal 0.0 ratio (it crushed per-model averages in PostHog).

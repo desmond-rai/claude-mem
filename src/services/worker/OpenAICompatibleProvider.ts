@@ -23,6 +23,10 @@ export interface ProviderQueryResult {
   tokensUsed?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Provider-reported prompt tokens served from context cache. */
+  cacheHitTokens?: number;
+  /** Provider-reported prompt tokens not served from context cache. */
+  cacheMissTokens?: number;
   /** Real provider-reported spend in USD (only some gateways report it). */
   costUsd?: number;
   /** The model that actually served the request, when reported. */
@@ -54,7 +58,7 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
    */
   protected abstract readonly forwardEmptyMessageResponse: boolean;
   /** Whether observation/summary output gets one bounded XML-format repair. */
-  protected readonly repairInvalidResponses = false;
+  protected readonly repairInvalidResponses: boolean = false;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     this.dbManager = dbManager;

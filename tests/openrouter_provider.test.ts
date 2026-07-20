@@ -45,17 +45,27 @@ class RepairProbeProvider extends OpenRouterProvider {
 }
 
 class FetchRepairProbeProvider extends OpenRouterProvider {
+  private readonly testConfig = {
+    apiKey: 'test-api-key',
+    model: 'test/model',
+    maxContextMessages: 20,
+    apiUrl: 'https://api.deepseek.com/chat/completions',
+  };
+
   repairForTest(history: ConversationMessage[]): Promise<ProviderQueryResult> {
     return this.queryWithFormatRepair(
       history,
-      {
-        apiKey: 'test-api-key',
-        model: 'test/model',
-        maxContextMessages: 20,
-        apiUrl: 'https://api.deepseek.com/chat/completions',
-      },
+      this.testConfig,
       18,
     );
+  }
+
+  queryForTest(history: ConversationMessage[]): Promise<ProviderQueryResult> {
+    return this.query(history, this.testConfig);
+  }
+
+  usageForTest(result: ProviderQueryResult) {
+    return this.buildLastUsage(result);
   }
 }
 
@@ -206,5 +216,69 @@ describe('OpenRouterProvider context cap', () => {
     expect(sentHistories[1]?.[0]?.content).toBe('original observer prompt');
     expect(sentHistories[1]?.at(-1)?.content).toContain('required output protocol');
     expect(stable).toHaveLength(30);
+  });
+
+  it('normalizes DeepSeek cache hit and miss usage', async () => {
+    global.fetch = mock(async () => new Response(JSON.stringify({
+      model: 'deepseek-v4-flash',
+      choices: [{ message: { content: '<skip_summary reason="nothing to add"/>' } }],
+      usage: {
+        prompt_tokens: 2195,
+        completion_tokens: 12,
+        total_tokens: 2207,
+        prompt_cache_hit_tokens: 2176,
+        prompt_cache_miss_tokens: 19,
+      },
+    })));
+    const provider = new FetchRepairProbeProvider({} as DatabaseManager, {} as SessionManager);
+
+    const result = await provider.queryForTest([{ role: 'user', content: 'Return summary XML' }]);
+
+    expect(result.cacheHitTokens).toBe(2176);
+    expect(result.cacheMissTokens).toBe(19);
+    expect(provider.usageForTest(result)).toEqual({
+      input: 2195,
+      output: 12,
+      cacheHit: 2176,
+      cacheMiss: 19,
+    });
+  });
+
+  it('leaves omitted cache usage absent', async () => {
+    global.fetch = mock(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '<skip_summary reason="nothing to add"/>' } }],
+      usage: {
+        prompt_tokens: 40,
+        completion_tokens: 5,
+        total_tokens: 45,
+      },
+    })));
+    const provider = new FetchRepairProbeProvider({} as DatabaseManager, {} as SessionManager);
+
+    const result = await provider.queryForTest([{ role: 'user', content: 'Return summary XML' }]);
+
+    expect(result).not.toHaveProperty('cacheHitTokens');
+    expect(result).not.toHaveProperty('cacheMissTokens');
+    expect(provider.usageForTest(result)).toEqual({ input: 40, output: 5 });
+  });
+
+  it('preserves cache usage when the provider response content is empty', async () => {
+    global.fetch = mock(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '' } }],
+      usage: {
+        prompt_tokens: 1024,
+        completion_tokens: 0,
+        total_tokens: 1024,
+        prompt_cache_hit_tokens: 1000,
+        prompt_cache_miss_tokens: 24,
+      },
+    })));
+    const provider = new FetchRepairProbeProvider({} as DatabaseManager, {} as SessionManager);
+
+    const result = await provider.queryForTest([{ role: 'user', content: 'Return summary XML' }]);
+
+    expect(result.content).toBe('');
+    expect(result.cacheHitTokens).toBe(1000);
+    expect(result.cacheMissTokens).toBe(24);
   });
 });
