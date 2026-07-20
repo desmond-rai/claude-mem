@@ -5,6 +5,8 @@ import { buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, buildConti
 import type { ActiveSession, ConversationMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import type { ModeConfig } from '../domain/types.js';
+import { parseAgentXml } from '../../sdk/parser.js';
+import { classifyObserverOutput } from '../../sdk/output-classifier.js';
 import {
   processAgentResponse,
   isAbortError,
@@ -21,6 +23,10 @@ export interface ProviderQueryResult {
   tokensUsed?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Provider-reported prompt tokens served from context cache. */
+  cacheHitTokens?: number;
+  /** Provider-reported prompt tokens not served from context cache. */
+  cacheMissTokens?: number;
   /** Real provider-reported spend in USD (only some gateways report it). */
   costUsd?: number;
   /** The model that actually served the request, when reported. */
@@ -51,6 +57,8 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
    * preserves that per-provider divergence.
    */
   protected abstract readonly forwardEmptyMessageResponse: boolean;
+  /** Whether observation/summary output gets one bounded XML-format repair. */
+  protected readonly repairInvalidResponses: boolean = false;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     this.dbManager = dbManager;
@@ -74,6 +82,61 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
 
   /** Hook for per-session setup that runs once config is resolved (e.g. endpointClass). */
   protected prepareSessionExtras(_session: ActiveSession, _config: TConfig): void {}
+
+  /**
+   * Run one content-level repair for empty or malformed observer output.
+   * Repair scaffolding is built on a copy so stable session history is never
+   * polluted by the invalid response or correction prompt.
+   */
+  protected async queryWithFormatRepair(
+    history: ConversationMessage[],
+    config: TConfig,
+    sessionId: string | number,
+  ): Promise<ProviderQueryResult> {
+    const initial = await this.query(history, config);
+    if (!this.repairInvalidResponses || parseAgentXml(initial.content).valid) {
+      return initial;
+    }
+
+    const repairHistory = history.map(message => ({ ...message }));
+    if (initial.content.trim()) {
+      repairHistory.push({ role: 'assistant', content: initial.content });
+    }
+    repairHistory.push({
+      role: 'user',
+      content: 'Your previous response violated the required output protocol. Return only the XML form requested by the preceding user message. Do not include markdown fences, prose, or explanation.',
+    });
+
+    logger.warn('SDK', `${this.providerName} format repair attempted`, {
+      sessionId,
+      outputClass: classifyObserverOutput(initial.content),
+    });
+
+    try {
+      const repaired = await this.query(repairHistory, config);
+      const repairedIsValid = parseAgentXml(repaired.content).valid;
+      if (repairedIsValid) {
+        logger.info('SDK', `${this.providerName} format repair succeeded`, {
+          sessionId,
+          outputClass: classifyObserverOutput(repaired.content),
+        });
+      } else {
+        logger.warn('SDK', `${this.providerName} format repair still invalid`, {
+          sessionId,
+          outputClass: classifyObserverOutput(repaired.content),
+        });
+      }
+      return repaired;
+    } catch (error: unknown) {
+      logger.error(
+        'SDK',
+        `${this.providerName} format repair failed`,
+        { sessionId },
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      throw error;
+    }
+  }
 
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     const config = this.getConfig();
@@ -208,7 +271,11 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     session.conversationHistory.push({ role: 'user', content: obsPrompt });
     session.lastPromptSentAt = Date.now();
     session.lastGeneratorSource = 'ingest';
-    const obsResponse = await this.query(session.conversationHistory, config);
+    const obsResponse = await this.queryWithFormatRepair(
+      session.conversationHistory,
+      config,
+      session.sessionDbId,
+    );
 
     let tokensUsed = 0;
     if (obsResponse.content) {
@@ -257,7 +324,11 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     session.conversationHistory.push({ role: 'user', content: summaryPrompt });
     session.lastPromptSentAt = Date.now();
     session.lastGeneratorSource = 'summarize';
-    const summaryResponse = await this.query(session.conversationHistory, config);
+    const summaryResponse = await this.queryWithFormatRepair(
+      session.conversationHistory,
+      config,
+      session.sessionDbId,
+    );
 
     let tokensUsed = 0;
     if (summaryResponse.content) {

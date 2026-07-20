@@ -12,7 +12,7 @@ import { DATA_DIR, DB_PATH, ensureDir } from '../shared/paths.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { getUptimeSeconds } from '../shared/uptime.js';
 import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
-import { getAuthMethodDescription } from '../shared/EnvManager.js';
+import { getProviderAuthMethodDescription } from '../shared/EnvManager.js';
 import { logger } from '../utils/logger.js';
 import { ChromaMcpManager } from './sync/ChromaMcpManager.js';
 import { ChromaSync } from './sync/ChromaSync.js';
@@ -273,12 +273,12 @@ export class WorkerService implements WorkerRef {
       onRestart: () => this.shutdown('restart'),
       workerPath: __filename,
       getAiStatus: () => {
-        let provider = 'claude';
+        let provider: 'claude' | 'gemini' | 'openrouter' = 'claude';
         if (isOpenRouterSelected() && isOpenRouterAvailable()) provider = 'openrouter';
         else if (isGeminiSelected() && isGeminiAvailable()) provider = 'gemini';
         return {
           provider,
-          authMethod: getAuthMethodDescription(),
+          authMethod: getProviderAuthMethodDescription(provider),
           lastInteraction: this.lastAiInteraction
             ? {
                 timestamp: this.lastAiInteraction.timestamp,
