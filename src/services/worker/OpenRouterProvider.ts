@@ -159,6 +159,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
   protected readonly providerName = 'OpenRouter';
   protected readonly syntheticIdPrefix = 'openrouter';
   protected readonly forwardEmptyMessageResponse = true;
+  protected override readonly repairInvalidResponses = true;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     super(dbManager, sessionManager);
