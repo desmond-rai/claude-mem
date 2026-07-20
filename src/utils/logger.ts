@@ -1,5 +1,12 @@
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+} from 'fs';
 import { join } from 'path';
 import { paths } from '../shared/paths.js';
 import { emitDiagnostic } from '../shared/hook-io.js';
@@ -72,6 +79,54 @@ interface LogContext {
 export type ErrorSink = (err: unknown, ctx?: Record<string, unknown>) => void;
 let errorSink: ErrorSink | null = null;
 
+export const DEFAULT_LOG_RETENTION_DAYS = 30;
+
+export function parseLogRetentionDays(value: unknown): number {
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '');
+  if (!/^\d+$/.test(text)) return DEFAULT_LOG_RETENTION_DAYS;
+  const days = Number(text);
+  return Number.isSafeInteger(days) && days >= 0 && days <= 365
+    ? days
+    : DEFAULT_LOG_RETENTION_DAYS;
+}
+
+export function pruneOldDailyLogs(
+  logsDir: string,
+  now: Date,
+  retentionDays: number,
+): void {
+  if (retentionDays === 0) return;
+
+  const cutoff = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  ));
+  cutoff.setUTCDate(cutoff.getUTCDate() - (retentionDays - 1));
+
+  for (const entry of readdirSync(logsDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const match = /^claude-mem-(\d{4})-(\d{2})-(\d{2})\.log$/.exec(entry.name);
+    if (!match) continue;
+
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const encodedDate = new Date(Date.UTC(year, month - 1, day));
+    if (
+      encodedDate.getUTCFullYear() !== year
+      || encodedDate.getUTCMonth() !== month - 1
+      || encodedDate.getUTCDate() !== day
+    ) {
+      continue;
+    }
+
+    if (encodedDate < cutoff) {
+      unlinkSync(join(logsDir, entry.name));
+    }
+  }
+}
+
 
 class Logger {
   private level: LogLevel | null = null;
@@ -93,6 +148,27 @@ class Logger {
 
       if (!existsSync(logsDir)) {
         mkdirSync(logsDir, { recursive: true });
+      }
+
+      let configuredRetention: unknown = process.env.CLAUDE_MEM_LOG_RETENTION_DAYS;
+      if (configuredRetention === undefined) {
+        const settingsPath = paths.settings();
+        if (existsSync(settingsPath)) {
+          try {
+            const settingsData = readFileSync(settingsPath, 'utf-8');
+            const settings = parseJsonWithBom<Record<string, any>>(settingsData);
+            configuredRetention = settings.CLAUDE_MEM_LOG_RETENTION_DAYS
+              ?? settings.env?.CLAUDE_MEM_LOG_RETENTION_DAYS;
+          } catch (error: unknown) {
+            console.error('[LOGGER] Failed to load log retention setting:', error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+
+      try {
+        pruneOldDailyLogs(logsDir, new Date(), parseLogRetentionDays(configuredRetention));
+      } catch (error: unknown) {
+        console.error('[LOGGER] Failed to prune old log files:', error instanceof Error ? error.message : String(error));
       }
 
       const date = new Date().toISOString().split('T')[0];

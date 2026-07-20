@@ -18,6 +18,17 @@ const toggleMcpSchema = z.object({
   enabled: z.boolean(),
 }).passthrough();
 
+export function validateLogRetentionDays(value: unknown): { valid: boolean; error?: string } {
+  const error = 'CLAUDE_MEM_LOG_RETENTION_DAYS must be an integer between 0 and 365';
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '');
+  if (!/^\d+$/.test(text)) return { valid: false, error };
+
+  const days = Number(text);
+  return Number.isSafeInteger(days) && days >= 0 && days <= 365
+    ? { valid: true }
+    : { valid: false, error };
+}
+
 export class SettingsRoutes extends BaseRouteHandler {
   constructor(
     private settingsManager: SettingsManager
@@ -90,6 +101,7 @@ export class SettingsRoutes extends BaseRouteHandler {
       'CLAUDE_MEM_OPENROUTER_APP_NAME',
       'CLAUDE_MEM_DATA_DIR',
       'CLAUDE_MEM_LOG_LEVEL',
+      'CLAUDE_MEM_LOG_RETENTION_DAYS',
       'CLAUDE_MEM_PYTHON_VERSION',
       'CLAUDE_CODE_PATH',
       'CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS',
@@ -181,6 +193,11 @@ export class SettingsRoutes extends BaseRouteHandler {
       if (!validLevels.includes(settings.CLAUDE_MEM_LOG_LEVEL.toUpperCase())) {
         return { valid: false, error: 'CLAUDE_MEM_LOG_LEVEL must be one of: DEBUG, INFO, WARN, ERROR, SILENT' };
       }
+    }
+
+    if (settings.CLAUDE_MEM_LOG_RETENTION_DAYS !== undefined) {
+      const retentionValidation = validateLogRetentionDays(settings.CLAUDE_MEM_LOG_RETENTION_DAYS);
+      if (!retentionValidation.valid) return retentionValidation;
     }
 
     if (settings.CLAUDE_MEM_PYTHON_VERSION) {

@@ -25,6 +25,7 @@ export interface SettingsDefaults {
   CLAUDE_MEM_OPENROUTER_APP_NAME: string;
   CLAUDE_MEM_DATA_DIR: string;
   CLAUDE_MEM_LOG_LEVEL: string;
+  CLAUDE_MEM_LOG_RETENTION_DAYS: string;
   CLAUDE_MEM_PYTHON_VERSION: string;
   CLAUDE_CODE_PATH: string;
   CLAUDE_MEM_MODE: string;
@@ -117,6 +118,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_OPENROUTER_APP_NAME: 'claude-mem',  // App name for OpenRouter analytics
     CLAUDE_MEM_DATA_DIR: join(homedir(), '.claude-mem'),
     CLAUDE_MEM_LOG_LEVEL: 'INFO',
+    CLAUDE_MEM_LOG_RETENTION_DAYS: '30',
     CLAUDE_MEM_PYTHON_VERSION: '3.13',
     CLAUDE_CODE_PATH: '', // Empty means auto-detect via 'which claude'
     CLAUDE_MEM_MODE: 'code', // Default mode profile
