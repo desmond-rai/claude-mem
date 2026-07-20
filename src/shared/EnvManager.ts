@@ -324,3 +324,11 @@ export function getAuthMethodDescription(): string {
   }
   return 'Claude Code OAuth token (read from system keychain at spawn)';
 }
+
+export function getProviderAuthMethodDescription(
+  provider: 'claude' | 'gemini' | 'openrouter',
+): string {
+  if (provider === 'openrouter') return 'OpenRouter-compatible API key';
+  if (provider === 'gemini') return 'Gemini API key';
+  return getAuthMethodDescription();
+}
