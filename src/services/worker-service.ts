@@ -2,6 +2,7 @@
 import path from 'path';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { pathToFileURL } from 'url';
 import type { Database } from 'bun:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -55,7 +56,7 @@ import {
   httpShutdown
 } from './infrastructure/HealthMonitor.js';
 import { performGracefulShutdown } from './infrastructure/GracefulShutdown.js';
-import { adoptMergedWorktrees, adoptMergedWorktreesForAllKnownRepos } from './infrastructure/WorktreeAdoption.js';
+import { adoptMergedWorktrees, adoptMergedWorktreesForAllKnownRepos, formatAdoptionErrors } from './infrastructure/WorktreeAdoption.js';
 
 import { Server } from './server/Server.js';
 import { BetterAuthRoutes } from '../server/auth/BetterAuthRoutes.js';
@@ -93,6 +94,8 @@ import { SessionCompletionHandler } from './worker/session/SessionCompletionHand
 import { setIngestContext, attachIngestGeneratorStarter } from './worker/http/shared.js';
 import { DEFAULT_CONFIG_PATH, DEFAULT_STATE_PATH, expandHomePath, filterNativeHookBackedCodexWatches, loadTranscriptWatchConfig } from './transcripts/config.js';
 import { TranscriptWatcher } from './transcripts/watcher.js';
+import { SyncApply } from './sync/SyncApply.js';
+import { SyncClient } from './sync/SyncClient.js';
 
 import { ViewerRoutes } from './worker/http/routes/ViewerRoutes.js';
 import { SessionRoutes } from './worker/http/routes/SessionRoutes.js';
@@ -220,6 +223,7 @@ export class WorkerService implements WorkerRef {
 
   private chromaMcpManager: ChromaMcpManager | null = null;
   private transcriptWatcher: TranscriptWatcher | null = null;
+  private syncClient: SyncClient | null = null;
   private initializationComplete: Promise<void>;
   private resolveInitialization!: () => void;
 
@@ -472,25 +476,6 @@ export class WorkerService implements WorkerRef {
       logger.info('WORKER', 'Checking for one-time CWD remap...');
       runOneTimeCwdRemap();
 
-      logger.info('WORKER', 'Adopting merged worktrees (background)...');
-      adoptMergedWorktreesForAllKnownRepos({}).then(adoptions => {
-        if (adoptions) {
-          for (const adoption of adoptions) {
-            if (adoption.adoptedObservations > 0 || adoption.adoptedSummaries > 0 || adoption.chromaUpdates > 0) {
-              logger.info('SYSTEM', 'Merged worktrees adopted in background', adoption);
-            }
-            if (adoption.errors.length > 0) {
-              logger.warn('SYSTEM', 'Worktree adoption had per-branch errors', {
-                repoPath: adoption.repoPath,
-                errors: adoption.errors
-              });
-            }
-          }
-        }
-      }).catch(err => {
-        logger.error('WORKER', 'Worktree adoption failed (background)', {}, err instanceof Error ? err : new Error(String(err)));
-      });
-
       const chromaEnabled = settings.CLAUDE_MEM_CHROMA_ENABLED !== 'false';
       if (chromaEnabled) {
         this.chromaMcpManager = ChromaMcpManager.getInstance();
@@ -504,6 +489,68 @@ export class WorkerService implements WorkerRef {
 
       runOneTimeV12_4_3Cleanup();
 
+      // Worktree adoption stays fire-and-forget (#2122) — init never awaits
+      // it — but it is kicked only after dbManager.initialize() and the
+      // one-time cleanup above have finished: adoption writes through its own
+      // connection, and starting it earlier raced the boot-time migration
+      // writer for the single WAL writer slot ('database is locked', #3378).
+      logger.info('WORKER', 'Adopting merged worktrees (background)...');
+      adoptMergedWorktreesForAllKnownRepos({}).then(adoptions => {
+        if (adoptions) {
+          for (const adoption of adoptions) {
+            if (adoption.adoptedObservations > 0 || adoption.adoptedSummaries > 0 || adoption.chromaUpdates > 0) {
+              logger.info('SYSTEM', 'Merged worktrees adopted in background', adoption);
+            }
+            if (adoption.errors.length > 0) {
+              logger.warn('SYSTEM', 'Worktree adoption had per-branch errors', {
+                repoPath: adoption.repoPath,
+                errors: formatAdoptionErrors(adoption.errors)
+              });
+            }
+          }
+        }
+      }).catch(err => {
+        logger.error('WORKER', 'Worktree adoption failed (background)', {}, err instanceof Error ? err : new Error(String(err)));
+      });
+
+      // Two-lane sync pull loop (plan Phase 3 task 3). Constructed only when
+      // CloudSync is active AND resolved a device id (fail-closed identity —
+      // SyncApply refuses to run under a second identity source). ChromaSync
+      // is forwarded so pulled rows land in vector search too. The session
+      // activity signal is SessionManager's in-memory session map — the same
+      // count the health endpoint reports.
+      const cloudSyncForPull = this.dbManager.getCloudSync();
+      const pullDeviceId = cloudSyncForPull?.status().deviceId ?? '';
+      if (cloudSyncForPull && pullDeviceId !== '') {
+        const syncApply = new SyncApply(this.dbManager.getConnection(), {
+          deviceId: pullDeviceId,
+          chromaSync: this.dbManager.getChromaSync(),
+        });
+        this.syncClient = new SyncClient(syncApply, {
+          hubUrl: settings.CLAUDE_MEM_CLOUD_SYNC_HUB_URL,
+          token: settings.CLAUDE_MEM_CLOUD_SYNC_TOKEN,
+          userId: settings.CLAUDE_MEM_CLOUD_SYNC_USER_ID,
+          deviceId: pullDeviceId,
+          deviceName: settings.CLAUDE_MEM_CLOUD_SYNC_DEVICE_NAME,
+          isSessionActive: () => this.sessionManager.getActiveSessionCount() > 0,
+          // Advisory WebSocket (plan Phase 4): enabled by default alongside
+          // the hub URL; CLAUDE_MEM_CLOUD_SYNC_WS='false' pins HTTP-only.
+          wsEnabled: settings.CLAUDE_MEM_CLOUD_SYNC_WS !== 'false',
+          // While the socket is live, pushes debounce at the fast tier —
+          // fan-out makes the push the delivery (Phase 4 task 3).
+          onSocketLiveChange: (live) => cloudSyncForPull.setFastDebounce(live),
+        });
+        // Push piggyback: a flush that reveals unseen hub ops pulls without
+        // waiting for the poll timer (free poll for the active device).
+        cloudSyncForPull.setHeadSeqListener((headSeq) => this.syncClient?.onHeadSeq(headSeq));
+        // Kill-switch piggyback (plan Phase 5 task 2): push responses carry
+        // X-Sync-Mode while the hub's kill switch is tripped — 'poll' drops
+        // the advisory socket and suppresses reconnects; SyncClient's own
+        // pulls carry the same header, and its disappearance resumes the
+        // socket. Product stays complete on the Phase 3 poll path.
+        cloudSyncForPull.setSyncModeListener((mode) => this.syncClient?.onSyncModeHint(mode));
+      }
+
       logger.info('WORKER', 'Initializing search services...');
       const formattingService = new FormattingService();
       const timelineService = new TimelineService();
@@ -514,7 +561,7 @@ export class WorkerService implements WorkerRef {
         formattingService,
         timelineService
       );
-      this.searchRoutes = new SearchRoutes(searchManager);
+      this.searchRoutes = new SearchRoutes(searchManager, this.syncClient);
       this.server.registerRoutes(this.searchRoutes);
       logger.info('WORKER', 'SearchManager initialized and search routes registered');
 
@@ -606,10 +653,14 @@ export class WorkerService implements WorkerRef {
       }
 
       // Cloud sync startup drain (non-blocking). The database is the queue:
-      // everything unsynced is simply `synced_at IS NULL`, so this one kick
-      // IS backfill, offline catch-up, and retry. Null when no token/user id
-      // is configured (DatabaseManager gates construction).
+      // eligible post-launch writes remain `synced_at IS NULL`, so this one
+      // kick handles catch-up and retry without migrating the pre-launch
+      // baseline. Null when no token/user id/hub URL is configured
+      // (DatabaseManager gates construction).
       this.dbManager.getCloudSync()?.start();
+      // Pull loop start (plan Phase 3 task 3): immediate catch-up pull, then
+      // 30 s active / 5 min idle / suspended after 1 h without sessions.
+      this.syncClient?.start();
 
       const mcpServerPath = path.join(__dirname, 'mcp-server.cjs');
       this.mcpReady = existsSync(mcpServerPath);
@@ -746,6 +797,14 @@ export class WorkerService implements WorkerRef {
           logger.info('TRANSCRIPT', 'Transcript watcher stopped');
         }
 
+        // Stop the pull loop before the DB starts closing: stop() clears the
+        // timer and makes any in-flight cycle bail before its next DB touch.
+        if (this.syncClient) {
+          this.syncClient.stop();
+          this.syncClient = null;
+          logger.info('SYNC_CLIENT', 'Sync pull loop stopped');
+        }
+
         // Mark this stop as graceful for the next start's crash detection, and
         // capture worker_stopped BEFORE shutdownTelemetry() — isShutdown drops
         // any event captured after the flush, by design.
@@ -871,6 +930,7 @@ function runServerServiceCli(command: string, extraArgs: string[] = []): void {
 
   const child = spawn(process.execPath, [serverScript, command, ...extraArgs], {
     stdio: 'inherit',
+    windowsHide: true,
     // Strip host CLI bleed-through (CLAUDE_CODE_*, including EFFORT_LEVEL) and
     // Anthropic credentials before handing env to the spawned daemon. The
     // daemon re-reads its own credentials from ~/.claude-mem/.env. See
@@ -1502,7 +1562,7 @@ function printQueueStatusIfBullMq(health: WorkerHealthSnapshot): void {
 
 const isMainModule = typeof require !== 'undefined' && typeof module !== 'undefined'
   ? require.main === module || !module.parent || process.env.CLAUDE_MEM_MANAGED === 'true'
-  : import.meta.url === `file://${process.argv[1]}`
+  : (Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href)
     || process.argv[1]?.endsWith('worker-service')
     || process.argv[1]?.endsWith('worker-service.cjs')
     || process.argv[1]?.replaceAll('\\', '/') === __filename?.replaceAll('\\', '/');

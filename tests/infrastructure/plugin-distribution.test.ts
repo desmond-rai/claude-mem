@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import path from 'path';
@@ -40,6 +40,7 @@ function mcpStartupCommandFrom(relativePath: string): string {
 
 describe('Plugin Distribution - Skills', () => {
   const skillPath = path.join(projectRoot, 'plugin/skills/mem-search/SKILL.md');
+  const modeCreatorPath = path.join(projectRoot, 'plugin/skills/mode-creator/SKILL.md');
 
   it('should include plugin/skills/mem-search/SKILL.md', () => {
     expect(existsSync(skillPath)).toBe(true);
@@ -64,6 +65,12 @@ describe('Plugin Distribution - Skills', () => {
     expect(content).toContain('timeline');
     expect(content).toContain('get_observations');
   });
+
+  it('should include the mode creator workflow and installers', () => {
+    expect(existsSync(modeCreatorPath)).toBe(true);
+    expect(existsSync(path.join(projectRoot, 'plugin/skills/mode-creator/scripts/install-mode.mjs'))).toBe(true);
+    expect(existsSync(path.join(projectRoot, 'plugin/skills/mode-creator/scripts/configure-telegram.mjs'))).toBe(true);
+  });
 });
 
 describe('Plugin Distribution - Required Files', () => {
@@ -76,6 +83,7 @@ describe('Plugin Distribution - Required Files', () => {
     'plugin/sqlite/SessionStore.js',
     'plugin/sqlite/observations/files.js',
     'plugin/skills/mem-search/SKILL.md',
+    'plugin/skills/mode-creator/SKILL.md',
     '.agents/plugins/marketplace.json',
   ];
 
@@ -245,7 +253,8 @@ describe('Plugin Distribution - package.json Files Field', () => {
 
     expect(result.status).toBe(0);
     const packed = JSON.parse(result.stdout);
-    const filePaths = new Set(packed[0].files.map((file: { path: string }) => file.path));
+    const packageInfo = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
+    const filePaths = new Set((packageInfo as { files: Array<{ path: string }> }).files.map(file => file.path));
 
     expect(filePaths.has('plugin/sqlite/SessionStore.js')).toBe(true);
     expect(filePaths.has('plugin/sqlite/observations/files.js')).toBe(true);
@@ -353,7 +362,13 @@ const RULE_A_EXPECTATIONS: Record<string, Record<string, RuleAExpectation>> = {
       trailingCommand: ['node', '"$_P/scripts/version-check.js"'],
       notFoundMessage: 'claude-mem: version-check.js not found',
     }),
-    'SessionStart.0.0': claudeHook(['start'], { trailingJson: { continue: true, suppressOutput: true } }),
+    // `start` already prints its own single, valid status JSON
+    // (buildStatusOutput → {"continue":true,"status":"ready","suppressOutput":true}),
+    // so NO trailingJson echo is appended — a second echoed object would
+    // concatenate two JSON documents on stdout, which Claude Code cannot parse,
+    // causing it to ignore suppressOutput and render the raw JSON at the top of
+    // every session.
+    'SessionStart.0.0': claudeHook(['start']),
     'SessionStart.0.1': claudeHook(['hook', 'claude-code', 'context']),
     'UserPromptSubmit.0.0': claudeHook(['hook', 'claude-code', 'session-init']),
     'PostToolUse.0.0': claudeHook(['hook', 'claude-code', 'observation']),
@@ -489,8 +504,38 @@ describe('Spawn-Contract Templating - Rule A shell resolution matrix', () => {
     try {
       for (const { command } of claudeCommands()) {
         const { stdout } = shellEval(instrument(command), { HOME: home });
-        // ls -dt yields a trailing slash; the hook trims it via _R="${_R%/}".
+        // The version-sort producer yields a trailing slash; the hook trims it
+        // via _R="${_R%/}".
         expect(stdout).toContain(`RESOLVED=${cacheRoot}`);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the highest cache version over the newest mtime and skips .orphaned_at dirs (2026-07-22 restart storm)', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'cm-home-'));
+    const cacheBase = path.join(home, '.claude', 'plugins', 'cache', 'thedotmack', 'claude-mem');
+    const makeVersion = (version: string) => {
+      const root = path.join(cacheBase, version);
+      mkdirSync(path.join(root, 'scripts'), { recursive: true });
+      for (const file of ['version-check.js', 'bun-runner.js', 'worker-service.cjs']) {
+        writeFileSync(path.join(root, 'scripts', file), '');
+      }
+      return root;
+    };
+    // The storm layout: the OLD version dir carries the .orphaned_at stamp and
+    // the newest mtime; the NEW version dir is older by mtime. The resolver
+    // must pick the new version anyway.
+    const oldRoot = makeVersion('13.11.0');
+    writeFileSync(path.join(oldRoot, '.orphaned_at'), String(Date.now()));
+    const newRoot = makeVersion('13.12.0');
+    const past = new Date(Date.now() - 600_000);
+    utimesSync(newRoot, past, past);
+    try {
+      for (const { command } of claudeCommands()) {
+        const { stdout } = shellEval(instrument(command), { HOME: home });
+        expect(stdout).toContain(`RESOLVED=${newRoot}`);
       }
     } finally {
       rmSync(home, { recursive: true, force: true });

@@ -19,6 +19,29 @@ describe('buildObservationPrompt', () => {
   });
 });
 
+describe('buildObservationPrompt batched events', () => {
+  it('tells the observer to inspect each event and emit only durable XML observations', () => {
+    const prompt = buildObservationPrompt({
+      id: 1,
+      tool_name: 'BatchedToolUse',
+      tool_input: JSON.stringify({ events: [
+        { index: 1, tool_name: 'Read', parameters: { file: 'a.ts' } },
+        { index: 2, tool_name: 'Edit', parameters: { file: 'a.ts' } },
+      ] }),
+      tool_output: JSON.stringify({ events: [
+        { index: 1, outcome: 'source' },
+        { index: 2, outcome: 'changed' },
+      ] }),
+      created_at_epoch: Date.now(),
+      cwd: '/repo',
+    });
+
+    expect(prompt).toContain('This payload contains multiple tool events');
+    expect(prompt).toContain('Inspect every indexed event');
+    expect(prompt).toContain('Do not create an observation merely because events were batched');
+  });
+});
+
 describe('buildObservationPrompt oversized field truncation (#2468)', () => {
   it('truncates an oversized outcome field with an elided marker, keeping head and tail', () => {
     const huge = 'HEAD_SENTINEL' + 'A'.repeat(60_000) + 'TAIL_SENTINEL';

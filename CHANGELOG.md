@@ -4,6 +4,287 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [13.16.0] - 2026-08-25
+
+## claude-mem for Cowork 🧠
+
+Claude started remembering Cowork tasks today — this release takes it further.
+
+### New: claude-mem-cowork plugin
+A second plugin in the marketplace, built for **Cowork** (native Claude app — mobile, web, desktop cloud sessions):
+
+- Hooks capture tool use in ephemeral Cowork containers and stream fragments to cmem.ai, where Pro runs the observer server-side
+- Compiled observations are injected into every new session and every spawned agent
+- **Fail-soft by design**: no API key → silent no-op; cmem.ai unreachable → events spool locally and flush later; every hook exits 0 unconditionally
+- Credential redaction hardened: short and whitespace-bearing values, any Authorization scheme, Cookie headers, full URI userinfo
+- mem-search + mem-setup skills bundled
+
+Install in any Cowork session:
+```
+/plugin marketplace add thedotmack/claude-mem
+/plugin install claude-mem-cowork@thedotmack
+```
+Then say "set up claude-mem".
+
+Landing page: https://cmem.ai/cowork
+
+### Also in this release
+- Memory Prize scorecard and slides (hackathon 05)
+- Overflow spool re-spools the remainder instead of dropping oldest events
+- Marketplace version alignment
+
+## [13.15.3] - 2026-08-20
+
+## What's Changed
+
+### OpenRouter attribution overhaul
+- Renamed the OpenRouter app entry to **Claude-Mem** (display title only — the ranking identity is the referer URL, which is unchanged, so the accumulated leaderboard history stays intact)
+- Centralized all attribution headers into a shared module (`src/shared/openrouter-attribution.ts`) so the worker and server providers can never drift apart and split the app entry
+- Migrated from the legacy `X-Title` header to the canonical `X-OpenRouter-Title`
+- Claimed marketplace categories via `X-OpenRouter-Categories: cli-agent,creative-writing`
+- Env overrides (`CLAUDE_MEM_OPENROUTER_SITE_URL` / `CLAUDE_MEM_OPENROUTER_APP_NAME`) still work for forks and self-hosted gateways
+
+### Fixes
+- wowerpoint skill: corrected the share URL format (dropped the `/d/` path segment)
+
+**Full Changelog**: https://github.com/thedotmack/claude-mem/compare/v13.15.2...v13.15.3
+
+## [13.15.2] - 2026-08-16
+
+## Observer errors now tell you what happened and what to do
+
+When the memory observer stops working — most commonly a CMEM Pro allowance that's been used up — claude-mem now says so in plain words, once, with the one thing to do about it. No more silent `OpenRouter upstream error (status 502)` retry loops.
+
+### Fixes
+- **Worker carries the gateway's error envelope** (#3601): the OpenRouter classifier now understands the cmem.ai gateway's `{code, message, action, url, request_id}` errors and, for plain OpenRouter, keeps the upstream body (e.g. `Key limit exceeded … Manage it using <url>`) instead of discarding it. 402 and "key limit exceeded" bodies are classified as quota exhausted and are **not retried**.
+- **One log line per failure**: `Observer failed {kind, code, requestId} <message — action url (req id)>` replaces the five-line fan-out.
+- **Session-start warning says the right thing** (#3601, #3612): the observer-health warning now shows the message, a `What to do:` line, the link, and the request id — and no longer tells Pro users to edit `~/.claude-mem/settings.json`. It also appears for projects that have no memories yet (previously the welcome hint hid it).
+- **Observer-health alerting** (#3538): claude-mem alerts you at session start when observations stop flowing.
+
+### Pro trial
+- **7-day Pro trial surfaced everywhere the viewer URL is shown** (#3613): session-start banner, per-message banner, first-session welcome hint, installer "Next Steps", viewer header, and cursor-hooks docs — one source of truth (`src/shared/pro-promo.ts`) with per-surface `?from=` attribution links to https://cmem.ai/pro.
+
+Pairs with the cmem.ai gateway change (claude-mem-pro #106): honest status codes (402/401/429/503, never 502), a 6-code error taxonomy, and an `x-request-id` on every error.
+
+_Note: v13.15.1 was tagged but never released or published; 13.15.2 supersedes it._
+
+## [13.15.0] - 2026-08-10
+
+The npx installer can now start a free week of CMEM Pro end to end:
+
+- **Trial funnel in `npx claude-mem install`** — pitch → email entry → magic-link → Stripe checkout, with the installer polling the pairing API and finishing setup automatically once the trial starts (#3524)
+- **Device-code approval** — the terminal shows a short code (XXXX-XXXX) that you confirm in the browser before credentials are delivered, closing a pairing-secret disclosure vector (#3524)
+- **Live model pricing** — the installer now fetches model pricing from the API instead of shipping hardcoded numbers (#3515)
+
+Requires the cmem.ai backend released today (trial routes + `cli_pairings` device-authorization grant).
+
+## [13.14.0] - 2026-08-08
+
+## CMEM Pro is now the first option in the installer
+
+`npx claude-mem` now leads its provider prompt with **CMEM Pro**, and every option shows what it actually costs per 1,000 observations — so the choice is made on price rather than brand recognition.
+
+```
+◆  Which memory provider do you want to use?
+│  ● CMEM Pro — observer model, off your plan  ($0/1k observations · $30/mo, cloud sync included)  Recommended
+│  ○ OpenRouter / any OpenAI-compatible key    (~$2.73/1k observations, billed to you)
+│  ○ Gemini API key                            (~$3.39/1k observations, billed to you)
+│  ○ Use your Anthropic plan                   (~$8.91/1k observations, billed to your Claude plan)
+```
+
+Anthropic moves last: it is the most expensive per observation and it bills your own Claude plan.
+
+### Picking CMEM Pro
+
+Opens `cmem.ai/pro?from=installer`, waits for the `cm_pro_…` key the signup flow hands back, writes it to settings, and points you at the browser to finish cloud sync. The key is pasted by hand — no polling, no device-code handshake.
+
+### No new provider code
+
+`OpenRouterProvider` is already a generic OpenAI-compatible client whose base URL and model both come from settings, so CMEM Pro is four settings writes:
+
+```json
+{
+  "CLAUDE_MEM_PROVIDER": "openrouter",
+  "CLAUDE_MEM_OPENROUTER_BASE_URL": "https://cmem.ai/api/inference/v1",
+  "CLAUDE_MEM_OPENROUTER_MODEL": "cmem-observer",
+  "CLAUDE_MEM_OPENROUTER_API_KEY": "cm_pro_<hex>"
+}
+```
+
+`'cmem'` is a prompt-only sentinel and never reaches `settings.json` — the worker still only understands `claude | gemini | openrouter`.
+
+### Cost figures
+
+New `src/npx-cli/cmem-pro-costs.ts` derives every label from one constant (`ratePerM × TOKENS_PER_OBSERVATION / 1000`), so re-pricing is a one-line edit. CMEM Pro deliberately carries no computed $/1k — it is a flat subscription that does not bill your tokens.
+
+`CMEM_PRO_ORIGIN` overrides the origin so the whole funnel can be walked against a dev server.
+
+### Notes
+
+- `openBrowser()` is best-effort; the URL is printed first, so headless boxes just get a copy-pasteable link.
+- Existing installs are unaffected — this changes the prompt, not any persisted provider.
+
+**Full Changelog**: https://github.com/thedotmack/claude-mem/compare/v13.13.1...v13.14.0
+
+## [13.13.1] - 2026-08-03
+
+## What’s new
+
+- Adds an interactive `/mode-creator` workflow that turns a user’s domain and note-taking needs into a custom claude-mem mode.
+- Guides capture-type and tag design, including specialized suggestions when standard code mode is a useful baseline.
+- Installs custom modes in durable user storage and reports the active mode in startup context.
+- Adds optional tag-triggered Telegram notifications with guided bot configuration and verification.
+- Includes mode-authoring and Telegram references, secure helper scripts, documentation, distribution coverage, and runtime tests.
+
+## Compatibility
+
+This patch release has no intended breaking changes.
+
+## [13.13.0] - 2026-08-02
+
+## Sensitive observation type
+
+Adds a ninth observation type to the code mode: **`sensitive`** — information that isn't quite private, but that you wouldn't want leaking into further content development in the wrong context. Internal URLs, unreleased plans, personal details, business metrics, client or partner names.
+
+These fire a **Telegram notification** by default, the same way `security_alert` does.
+
+### Configuring
+
+Notifications are controlled by `CLAUDE_MEM_TELEGRAM_TRIGGER_TYPES` in `~/.claude-mem/settings.json`. The default is now `security_alert,sensitive`. Set the key to any comma-separated list of types, or to an empty string to turn notifications off entirely.
+
+Existing installs are migrated automatically: if your trigger list is still the old default of exactly `security_alert`, it is rewritten to include `sensitive`. A customized list is left untouched. Without this migration the new type would never have notified on any existing install, because a fresh `settings.json` is seeded with every default and persisted values win on load.
+
+If you had deliberately set your trigger list to exactly `security_alert` and want it to stay that way, set it to something explicitly different after upgrading — the migration cannot distinguish that case from the seeded default.
+
+### Also in this release
+
+- **Observer prompt fix.** The `type_guidance` prompt still described "6 options" and never listed `security_alert` or `security_note` from #2084. That string is the only type prose the observer model sees — the per-type `description` fields are never injected into any prompt — so those types have been under-emitted since April. It now enumerates all nine.
+- Corpus filters, the OpenClaw detailed feed, and the weekly-digests legend all recognize the new type.
+- BMP-safe fallback for the new emoji, so injected context can't contribute a surrogate pair (the #2787 failure class).
+- Built plugin artifacts are regenerated, picking up the chroma concurrent-write fix from #3462 that had not yet been built into the shipped bundles.
+
+**Full changelog**: https://github.com/thedotmack/claude-mem/compare/v13.12.4...v13.13.0
+
+## [13.12.4] - 2026-07-23
+
+Four root-cause fixes from the post-v13.12.2 issue batch.
+
+## Fixes
+
+### Shutdown teardown no longer skipped on a non-listening server handle (#3380)
+`performGracefulShutdown` treated Node's `ERR_SERVER_NOT_RUNNING` from `server.close()` as fatal in step 1, which skipped session drain, MCP close, Chroma stop, DB close, and supervisor stop — the Windows port-hold symptom. An already-closed server now counts as closed (explicit code check, everything else still rejects), and `Server.listen()` assigns the handle only once actually listening, so a failed bind can no longer leave a stale non-listening handle for shutdown to trip on. (#3387)
+
+### Concept tags participate in context injection again (#3379)
+The observer prompt's own guidance format taught the model to emit `keyword: description` concept tags, which the exact-match injection SQL silently excluded — observations tagged that way never surfaced. Concepts are now truncated at the first colon at the parse boundary, the producer prompts in all four modes require bare keywords, and migration v49 backfills stored rows — requeueing corrected native rows for cloud re-push (sync_rev bump + synced_at reset, mirroring the prompt-repair convention) and guarded by `json_valid` so a malformed row cannot abort boot. The injection query itself is unchanged. (#3389)
+
+### Background init no longer aborts on orphaned rows; adoption race and logging fixed (#3378)
+The v7/v9 table-rebuild migrations copy child tables with foreign keys enforced, so historical orphaned observations/summaries (no `sdk_sessions` parent) threw `FOREIGN KEY constraint failed` in the SessionStore constructor and the worker never reported ready. A pin-down test proved the site red→green; the fix repairs stub parents in-place before both rebuild copies — orphaned rows are user data and are never deleted. Also: adoption errors now log as real text instead of `[object Object]`, and the worktree-adoption kick moved after DB init so its write connection no longer races boot migrations (`database is locked`). Complements the stale-worker recycle fix shipped in 13.12.3. (#3390)
+
+### Maintainer directives no longer ship to end users (#3381)
+Root CLAUDE.md's `Local Status Notes` and `Daily Maintenance` sections — including an autonomous upgrade-and-commit directive — shipped verbatim to every marketplace git-clone install and were obeyed by end-user Claude instances (the #2537 `.npmignore` guard only covers the npm tarball, see #3359). Those sections now live in gitignored `CLAUDE.local.md`; tracked CLAUDE.md keeps only contributor content, and the maintainer sync copies the slim file over any stale marketplace copy. (#3391)
+
+## Verification
+Full suite 2539 pass / 0 fail, tsc clean, anti-pattern sweep over the round's diff clean, worker restart cycle at 13.12.4 shows none of the fixed failure signatures.
+
+## [13.12.3] - 2026-07-23
+
+## Hotfix: self-perpetuating stale-worker recycle loop (#3378)
+
+**The bug.** On a version mismatch, hooks asked the running (stale) worker to restart itself — and the dying worker spawned its successor using its *own install's* code and resolver. A ≤13.11.0 worker would respawn its own version, re-bind the worker port before the hook's correctly-resolved lazy-spawn could, and the mismatch recurred on every prompt, forever. One report measured **2,424 recycles in a single day**, with every `UserPromptSubmit` ending in a ~40s hook timeout. Because the buggy handoff ran inside the *old* install's process, fixing the new version's resolver alone could never break the loop.
+
+**The fix.** Hooks no longer delegate the recycle to the corpse. On version mismatch the hook now:
+
+1. reads the owner-verified worker PID file,
+2. `SIGKILL`s the stale worker — the only teardown guaranteed to execute zero stale-version code,
+3. waits for the port to actually close, and
+4. spawns the resolved installed version itself, via the existing lazy-spawn path and the single version oracle.
+
+The dying-worker successor handoff now serves only CLI-initiated `claude-mem restart`, where the running install *is* the resolved install.
+
+**If you're currently stuck in the loop:** just update. The first hook that runs after this version installs will kill the resident stale worker and take over — no manual cleanup needed.
+
+**Not addressed in this release** (still open): the `FOREIGN KEY constraint failed` background-init error also reported in #3378, and the Windows stale-socket port hold in #3380.
+
+## [13.12.2] - 2026-07-23
+
+**54 community bug-fix PRs merged in one pass.** Every open PR in the repo (157 total) was evaluated against a strict rubric — now codified in [`docs/merge-rubric.md`](https://github.com/thedotmack/claude-mem/blob/main/docs/merge-rubric.md): root-cause corrections only, with no guards, circuit breakers, fallbacks, retries, fail-open modes, self-healing machinery, truncation, or bolt-on second systems.
+
+### Windows
+- Zombie-held worker ports now detected correctly, ending infinite startup-failure loops (#3356)
+- Console-flash sweep: `windowsHide` on every remaining live spawn path — git, npm, IDE detection, Codex installer, worker wrapper, taskkill, MCP launcher (#3335, #3320, #3319, #3305, #2921)
+- `bun.exe` resolved to its absolute path and spawned directly, skipping `cmd.exe` (which silently drops >8191-char PATH) (#3235, #3247)
+- Worker ESM main detection via `pathToFileURL` (#3318); UTF-8 BOM tolerated in settings JSON read (#3307)
+- `Start-Process` argument quoting survives spaced profile paths (#3293); `codex.cmd` shim quoting fixed (#3220)
+- PowerShell call operator (`&`) added to Cursor/Windsurf hook commands (#2507)
+- Missing Windows credential treated as absent instead of a spurious read failure (#3265); tests run on Windows via `fileURLToPath` (#3312)
+
+### Search & data integrity
+- Semantic search preserves Chroma relevance ranking instead of silently reordering by recency (#3325)
+- `type=<custom>` and non-category `type` filters no longer return empty results (#3281); `date_from`/`date_to` honored in worker searches (#3201)
+- Merged-project records hydrate correctly on semantic-search ID lookups and worktree adoption patches Chroma by typed doc targets (#3342)
+- `getUserPromptsByIds` applies `limit` after relevance reordering (#3347)
+- Chroma watermark gaps persist across bootstrap and live sync — no more permanently stranded rows (#3364); duplicate IDs reconciled in place, stopping unbounded index growth (#3268)
+- Custom observation types preserved instead of being misclassified as `bugfix` (#3185); `files_modified` is now evidence-gated from actual write/edit tool events (#3180)
+- Tool payloads no longer double-encoded in observation prompts (#3150)
+- Context generation opens SQLite strictly read-only under concurrent sessions (#3233)
+- MCP `tools/list` advertises only tools that work in the active runtime (#3065); `search` routes to the Postgres-backed `/v1/search` in server runtime when it can serve the query faithfully (#3082)
+
+### Worker & providers
+- `CLAUDE_MEM_MAX_CONCURRENT_AGENTS` actually enforced via atomic slot reservations (#3294)
+- Observations attributed to the current prompt's project after repo/worktree switches (#3237); claimed batches preserved on auth-failure prose instead of being deleted (#3236)
+- Worker startup waits through cold and concurrent readiness windows (#3238)
+- Observer thinking disabled so thinking-only skips can't trigger harness re-prompts (#3256); observer SDK sessions no longer pollute the user's project transcript tree (#2942)
+- `CLAUDE_MEM_TIER_SUMMARY_MODEL` honored on OpenAI-compatible providers (#3257)
+- Stale default model ids updated: Sonnet/Opus (#3187) and retired Gemini models (#3283)
+- `__IMPORTANT` MCP tool renamed `important_workflow` so strict clients can load the server (#3295); tsconfig `moduleResolution` moved to `bundler` for TS 6 (#3296)
+
+### Hooks, context & installers
+- `CLAUDE_MEM_EXCLUDED_PROJECTS` honored on session-start injection (#3358); subagents without MCP tools skip file-context injection (#3341)
+- `~` expanded in `CLAUDE_MEM_DATA_DIR` (#3350) and `CLAUDE_CODE_PATH` (#3275); Homebrew `uvx` path shared with the worker preflight (#3276)
+- SessionStart no longer dumps raw JSON at the top of every session (#3282); Codex no longer receives a duplicate context payload (#3241) and transcripts continue after archival (#3223)
+- Worktree compound keys preserved from subdirectories (#3304)
+- Azure AI Foundry auth env preserved through the SDK sanitizer (#3314); invalid corpus names return 400 instead of 500 (#3251)
+- Codex plugin cache actually installs during setup — best-effort wrapper deleted, fail-fast (#3066)
+- `mergeSettings` and server bootstrap no longer destroy top-level settings keys (#2928, #2929)
+- version-bump skill frontmatter name matches its directory (#3313)
+
+### Docs
+- New [`docs/merge-rubric.md`](https://github.com/thedotmack/claude-mem/blob/main/docs/merge-rubric.md) — the acceptance bar for bug-fix PRs, distilled from this sweep.
+
+Thanks to everyone who contributed fixes: @rodboev, @stantheman0128, @huiihao, @jamincollins, @quinnmacro, @justindeisler, @davertor, @BBD-Resources, @povesma, @laihenyi, @LPdsgn, @KJJisBetter, @Steaeavean, @XX888QM, @rapidtackgithub, @SamuelZ12, @DNA, @girish-kanjiyani7, @E0993599799, @eslonaguiar, @desmond-rai, @Reese-max, @Wasabi-221, @mic2112, @yaw-sh, @derrickchwong, @SaadSharif4, @katsugtgz, @manoi-bms, @percy-raskova, @ShiroKSH, @eralpozcan, @anupamme, @SejiL, @remten341, @danscMax, @jamesdsizemore, and the PostHog bot fleet.
+
+## [13.12.1] - 2026-07-23
+
+## Critical fix: worker restart storm
+
+Fixes an infinite worker restart loop triggered by plugin upgrades. The worker-script resolver ranked plugin cache directories by **mtime**, so when Claude Code stamped a superseded version dir with `.orphaned_at` (bumping its mtime), every restart respawned the **old** version while hooks on the new version kept demanding a restart — spawning hundreds of processes until the host machine exhausted its process table.
+
+All four resolvers (worker successor, MCP launcher, Codex Windows launcher, POSIX hook prelude) now rank cache dirs by **version** — never mtime — skip orphan-stamped dirs, and share one deterministic version oracle with the staleness detector (`checkVersionMatch`), making the restart loop structurally impossible.
+
+**Recommended upgrade for all users.** Note: the vulnerable resolver is the one running *during* an upgrade, so machines are protected from the next upgrade onward.
+
+Details: #3371
+
+## [13.12.0] - 2026-07-22
+
+## Two-Lane Cloud Sync (cmem.ai Pro)
+
+This release ships the complete two-lane sync architecture between your local claude-mem database and the cmem.ai sync hub (PR #3333):
+
+- **Per-user Durable Object sync hub** — a Cloudflare Worker (`workers/sync-hub`) serving isolated HTTP push/pull lanes per user (Phase 1)
+- **Client apply path + schema migration v41** — deterministic application of remote changes into the local SQLite store (Phase 2)
+- **Hub push/pull transport + mutation outbox** — local mutations queue durably and survive offline periods and retries (Phase 3)
+- **Advisory WebSocket speed layer** — near-real-time sync nudges; correctness never depends on the socket staying up (Phase 4)
+- **Guardrails + monitoring** — kill switch, watchdog, canary, and a full sync-matrix E2E suite (Phase 5)
+- **Canonical v2 projection pipeline** and SyncHub-only client cutover
+- Hardened verifier authentication on the sync hub
+
+**Sync is OFF by default.** `CLAUDE_MEM_CLOUD_SYNC_HUB_URL` defaults to empty — nothing leaves your machine unless you configure a hub URL (see the `cloud-sync` skill or https://docs.claude-mem.ai/cloud-sync).
+
+### Fixes
+
+- Restored process-global `mock.module` cleanup that broke CI under Linux readdir ordering
+
 ## [13.11.0] - 2026-07-13
 
 ## Worker-native cloud sync (PR #3182)

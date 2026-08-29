@@ -9,6 +9,7 @@ import fs from 'fs';
 import { logger } from '../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH, paths } from '../../shared/paths.js';
+import { getUvxBinDirs } from '../../shared/uvx-bin-dirs.js';
 import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 import { getSupervisor } from '../../supervisor/index.js';
 import { captureProcessStartToken, isPidAlive } from '../../supervisor/process-registry.js';
@@ -28,6 +29,8 @@ const RECONNECT_BACKOFF_MS = 10_000;
 const CHROMA_WRITER_LOCK_FILENAME = '.claude-mem-chroma-writer.lock';
 const CHROMA_SUPERVISOR_ID = 'chroma-mcp';
 const CHROMA_OUTPUT_TAIL_MAX_CHARS = 2048;
+const DEFAULT_MAX_PENDING_MUTATIONS = 5_000;
+const CHROMA_MUTATION_TOOL_PATTERN = /^chroma_(?:add|create|delete|modify|update|upsert)_/;
 
 const CHROMA_MCP_PINNED_VERSION = '0.2.6';
 
@@ -87,9 +90,21 @@ export class ChromaMcpManager {
   private readonly chromaWriterOwnerId = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   private chromaWriterLock: { path: string; dataDir: string; ownerId: string } | null = null;
   private unexpectedCloseCleanup: Promise<void> | null = null;
+  private mutationTail: Promise<void> = Promise.resolve();
+  private pendingMutationCalls = 0;
+  private readonly maxPendingMutationCalls: number;
+  private readonly serializeMutations: boolean;
+  private acceptingLocalMutations = true;
   private static uvxAvailabilityProbe: ((command: string, env: Record<string, string>, platform: NodeJS.Platform) => boolean) | null = null;
 
-  private constructor() {}
+  private constructor() {
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    const configuredLimit = Number.parseInt(settings.CLAUDE_MEM_CHROMA_MAX_PENDING_MUTATIONS, 10);
+    this.maxPendingMutationCalls = Number.isInteger(configuredLimit) && configuredLimit > 0
+      ? configuredLimit
+      : DEFAULT_MAX_PENDING_MUTATIONS;
+    this.serializeMutations = (settings.CLAUDE_MEM_CHROMA_MODE || 'local') !== 'remote';
+  }
 
   static getInstance(): ChromaMcpManager {
     if (!ChromaMcpManager.instance) {
@@ -687,6 +702,18 @@ export class ChromaMcpManager {
   }
 
   async callTool(toolName: string, toolArguments: Record<string, unknown>): Promise<unknown> {
+    if (!this.serializeMutations || !ChromaMcpManager.isMutationTool(toolName)) {
+      return this.callToolUnqueued(toolName, toolArguments);
+    }
+    if (!this.acceptingLocalMutations) {
+      throw new ChromaUnavailableError('Local Chroma mutations are unavailable after shutdown begins');
+    }
+
+    return this.enqueueMutation(() => this.callToolUnqueued(toolName, toolArguments), toolName);
+  }
+
+  private async callToolUnqueued(toolName: string, toolArguments: Record<string, unknown>): Promise<unknown> {
+    const callGeneration = this.connectionGeneration;
     await this.ensureConnected();
 
     logger.debug('CHROMA_MCP', `Calling tool: ${toolName}`, {
@@ -704,12 +731,19 @@ export class ChromaMcpManager {
         error: transportError instanceof Error ? transportError.message : String(transportError)
       });
 
+      if (callGeneration !== this.connectionGeneration) {
+        throw new ChromaMcpConnectionCancelledError('chroma-mcp call cancelled during shutdown');
+      }
+
       // Tree-kill the dying subprocess before reconnect. Previously this path
       // just nulled the handle, which on Linux leaks the uv/python/chroma-mcp
       // descendants every time a transport error happens (#2313).
       await this.disposeCurrentSubprocess();
 
       try {
+        if (callGeneration !== this.connectionGeneration) {
+          throw new ChromaMcpConnectionCancelledError('chroma-mcp call cancelled during shutdown');
+        }
         await this.ensureConnected();
         result = await this.client!.callTool({
           name: toolName,
@@ -748,6 +782,41 @@ export class ChromaMcpManager {
       }
       return null;
     }
+  }
+
+  private async enqueueMutation<T>(operation: () => Promise<T>, toolName: string): Promise<T> {
+    if (this.pendingMutationCalls >= this.maxPendingMutationCalls) {
+      const message = `Chroma mutation queue is full (${this.pendingMutationCalls}/${this.maxPendingMutationCalls}); deferring "${toolName}" to a later backfill`;
+      logger.warn('CHROMA_MCP', message, {
+        toolName,
+        pendingMutations: this.pendingMutationCalls,
+        maxPendingMutations: this.maxPendingMutationCalls
+      });
+      throw new ChromaUnavailableError(message);
+    }
+
+    this.pendingMutationCalls += 1;
+    const enqueuedGeneration = this.connectionGeneration;
+    const run = this.mutationTail
+      .catch(() => undefined)
+      .then(async () => {
+        if (enqueuedGeneration !== this.connectionGeneration) {
+          throw new ChromaMcpConnectionCancelledError('queued chroma-mcp mutation cancelled during shutdown');
+        }
+        return operation();
+      });
+
+    this.mutationTail = run.then(() => undefined, () => undefined);
+
+    try {
+      return await run;
+    } finally {
+      this.pendingMutationCalls -= 1;
+    }
+  }
+
+  private static isMutationTool(toolName: string): boolean {
+    return CHROMA_MUTATION_TOOL_PATTERN.test(toolName);
   }
 
   async isHealthy(): Promise<boolean> {
@@ -937,6 +1006,7 @@ export class ChromaMcpManager {
    * pattern from shutdown.ts (Principle 5: OS-supervised teardown).
    */
   async stop(): Promise<void> {
+    this.acceptingLocalMutations = false;
     this.connectionGeneration += 1;
     await this.waitForUnexpectedCloseCleanup();
 
@@ -1167,25 +1237,22 @@ export class ChromaMcpManager {
    * worker inherited (the worker is spawned by the host with a minimal env that
    * predates the user adding uv to PATH). Without it, `uvx`/`cmd /c uvx` dies
    * with "not recognized" in ~25ms and semantic search silently falls back to
-   * keyword (#2790). Prepend uv's known bin dirs (and an explicit override) so
-   * the chroma child can always resolve uvx. Additive and cross-platform — only
-   * dirs that exist are added.
+   * keyword (#2790). Prepend uv's known bin dirs and the macOS Homebrew bins so
+   * the chroma child can always resolve uvx. Only dirs that exist are added.
    */
   private static uvBinDirs(): string[] {
-    const home = os.homedir();
-    const dirs = [
-      process.env.CLAUDE_MEM_CHROMA_UVX_PATH,           // explicit override (dir or uvx path)
-      path.join(home, '.local', 'bin'),                 // uv default (Windows + Unix)
-      path.join(home, '.cargo', 'bin'),                 // cargo-installed uv
-    ].filter((d): d is string => Boolean(d));
-    // If the override points at the uvx binary itself, use its directory.
-    return dirs.map(d => {
-      try {
-        return fs.existsSync(d) && fs.statSync(d).isFile() ? path.dirname(d) : d;
-      } catch (error) {
-        logger.debug('CHROMA_MCP', 'Failed to stat uv bin dir candidate, using as-is', { dir: d }, error instanceof Error ? error : new Error(String(error)));
-        return d;
-      }
+    return getUvxBinDirs({
+      homedir: os.homedir,
+      override: process.env.CLAUDE_MEM_CHROMA_UVX_PATH,
+      platform: process.platform,
+      isFile: dir => {
+        try {
+          return fs.existsSync(dir) && fs.statSync(dir).isFile();
+        } catch (error) {
+          logger.debug('CHROMA_MCP', 'Failed to stat uv bin dir candidate, using as-is', { dir }, error instanceof Error ? error : new Error(String(error)));
+          return false;
+        }
+      },
     });
   }
 
