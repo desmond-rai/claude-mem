@@ -2,6 +2,7 @@ import { DatabaseManager } from './DatabaseManager.js';
 import { logger } from '../../utils/logger.js';
 import type { ActiveSession, PendingMessage, PendingMessageWithId, ObservationData } from '../worker-types.js';
 import { SessionMessageBuffer } from './SessionMessageBuffer.js';
+import { ObservationBatcher } from './ObservationBatcher.js';
 import { getSdkProcessForSession, ensureSdkProcessExit } from '../../supervisor/process-registry.js';
 import { getSupervisor } from '../../supervisor/index.js';
 import { telemetryBuffer } from '../telemetry/buffer.js';
@@ -11,9 +12,27 @@ export class SessionManager {
   private sessions: Map<number, ActiveSession> = new Map();
   private onPendingMutate?: () => void;
   private readonly buffer = new SessionMessageBuffer(() => this.onPendingMutate?.());
+  private readonly observationBatcher: ObservationBatcher;
+  private readonly seenObservationToolUseIds = new Map<number, Set<string>>();
 
   constructor(dbManager: DatabaseManager) {
     this.dbManager = dbManager;
+    this.observationBatcher = new ObservationBatcher((sessionDbId, data, eventCount) => {
+      const message: PendingMessage = {
+        type: 'observation',
+        tool_name: data.tool_name,
+        tool_input: data.tool_input,
+        tool_response: data.tool_response,
+        prompt_number: data.prompt_number,
+        cwd: data.cwd,
+        agentId: data.agentId,
+        agentType: data.agentType,
+      };
+      this.buffer.enqueue(sessionDbId, message);
+      logger.info('QUEUE', `BATCH_FLUSHED | sessionDbId=${sessionDbId} | events=${eventCount} | tool=${data.tool_name} | depth=${this.getTotalQueueDepth()}`, {
+        sessionId: sessionDbId,
+      });
+    });
   }
 
   setOnPendingMutate(cb: () => void): void {
@@ -164,33 +183,31 @@ export class SessionManager {
       session = this.initializeSession(sessionDbId);
     }
 
-    const message: PendingMessage = {
-      type: 'observation',
-      tool_name: data.tool_name,
-      tool_input: data.tool_input,
-      tool_response: data.tool_response,
-      prompt_number: data.prompt_number,
-      cwd: data.cwd,
-      agentId: data.agentId,
-      agentType: data.agentType,
-      toolUseId: data.toolUseId,
-    };
-
-    const messageId = this.buffer.enqueue(sessionDbId, message);
-    const queueDepth = this.buffer.getPendingCount(sessionDbId);
     const toolSummary = logger.formatTool(data.tool_name, data.tool_input);
-    if (messageId === 0) {
-      logger.debug('QUEUE', `DUP_SUPPRESSED | sessionDbId=${sessionDbId} | type=observation | tool=${toolSummary} | toolUseId=${data.toolUseId ?? 'null'} | depth=${queueDepth}`, {
-        sessionId: sessionDbId
-      });
-    } else {
-      logger.info('QUEUE', `ENQUEUED | sessionDbId=${sessionDbId} | messageId=${messageId} | type=observation | tool=${toolSummary} | depth=${queueDepth}`, {
-        sessionId: sessionDbId
-      });
+    if (data.toolUseId) {
+      let seen = this.seenObservationToolUseIds.get(sessionDbId);
+      if (!seen) {
+        seen = new Set<string>();
+        this.seenObservationToolUseIds.set(sessionDbId, seen);
+      }
+      if (seen.has(data.toolUseId)) {
+        logger.debug('QUEUE', `DUP_SUPPRESSED | sessionDbId=${sessionDbId} | type=observation | tool=${toolSummary} | toolUseId=${data.toolUseId} | depth=${this.getTotalQueueDepth()}`, {
+          sessionId: sessionDbId,
+        });
+        return;
+      }
+      seen.add(data.toolUseId);
     }
+
+    this.observationBatcher.enqueue(sessionDbId, data);
+    this.onPendingMutate?.();
+    logger.info('QUEUE', `BATCH_BUFFERED | sessionDbId=${sessionDbId} | type=observation | tool=${toolSummary} | depth=${this.getTotalQueueDepth()}`, {
+      sessionId: sessionDbId,
+    });
   }
 
   async queueSummarize(sessionDbId: number, lastAssistantMessage?: string): Promise<void> {
+    this.flushObservationBatch(sessionDbId);
     let session = this.sessions.get(sessionDbId);
     if (!session) {
       session = this.initializeSession(sessionDbId);
@@ -214,8 +231,16 @@ export class SessionManager {
     }
   }
 
+  flushObservationBatch(sessionDbId: number): number {
+    return this.observationBatcher.flush(sessionDbId);
+  }
+
   async clearPendingForSession(sessionDbId: number): Promise<number> {
-    return this.buffer.clear(sessionDbId);
+    const delayed = this.observationBatcher.discard(sessionDbId);
+    const buffered = this.buffer.clear(sessionDbId);
+    this.seenObservationToolUseIds.delete(sessionDbId);
+    if (delayed > 0) this.onPendingMutate?.();
+    return delayed + buffered;
   }
 
   async resetProcessingToPending(sessionDbId: number): Promise<number> {
@@ -304,6 +329,8 @@ export class SessionManager {
       }
     }
 
+    this.observationBatcher.discard(sessionDbId);
+    this.seenObservationToolUseIds.delete(sessionDbId);
     this.buffer.dispose(sessionDbId);
     this.sessions.delete(sessionDbId);
     logger.info('SESSION', 'Session deleted', {
@@ -327,6 +354,8 @@ export class SessionManager {
       session.respawnTimer = undefined;
     }
 
+    this.observationBatcher.discard(sessionDbId);
+    this.seenObservationToolUseIds.delete(sessionDbId);
     this.buffer.dispose(sessionDbId);
     this.sessions.delete(sessionDbId);
     logger.info('SESSION', 'Session removed from active sessions', {
@@ -345,7 +374,7 @@ export class SessionManager {
   }
 
   getTotalQueueDepth(): number {
-    return this.buffer.getTotalDepth();
+    return this.buffer.getTotalDepth() + this.observationBatcher.getPendingCount();
   }
 
   async getTotalActiveWork(): Promise<number> {

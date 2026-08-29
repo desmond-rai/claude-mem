@@ -140,13 +140,17 @@ export function buildObservationPrompt(obs: Observation): string {
     toolOutput = obs.tool_output;
   }
 
+  const batchGuidance = obs.tool_name === 'BatchedToolUse'
+    ? `\nThis payload contains multiple tool events. Inspect every indexed event and its matching outcome. Return observations only for durable findings, changes, decisions, or resolved problems. Do not create an observation merely because events were batched.\n`
+    : '';
+
   return `<observed_from_primary_session>
   <what_happened>${obs.tool_name}</what_happened>
   <occurred_at>${new Date(obs.created_at_epoch).toISOString()}</occurred_at>${obs.cwd ? `\n  <working_directory>${obs.cwd}</working_directory>` : ''}
   <parameters>${truncateObservationField(toolInput)}</parameters>
   <outcome>${truncateObservationField(toolOutput)}</outcome>
 </observed_from_primary_session>
-
+${batchGuidance}
 If a <parameters> or <outcome> block above contains an "<elided chars=... />" marker, that field was truncated to fit the observer's context window. Describe only what you can see in the kept portion and do not infer details about the elided range.
 
 Return either one or more <observation>...</observation> blocks, or an empty response if this tool use should be skipped.

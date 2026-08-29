@@ -36,6 +36,7 @@ async function queueAndClaimOne(sm: SessionManager, sessionDbId: number): Promis
     prompt_number: 1,
     toolUseId: `tu-${sessionDbId}`,
   });
+  sm.flushObservationBatch(sessionDbId);
 
   const iterator = sm.getMessageIterator(sessionDbId);
   const claimed = await iterator.next();
