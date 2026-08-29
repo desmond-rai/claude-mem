@@ -64,6 +64,8 @@ export const ALLOWED_PROPERTY_KEYS: Set<string> = new Set([
   'compression_ms',
   'tokens_input',
   'tokens_output',
+  'cache_hit_tokens',
+  'cache_miss_tokens',
   'compression_ratio',
   'model',
   // Provider-reported spend of one compression call in USD (SDK result message
@@ -146,6 +148,8 @@ export const ALLOWED_PROPERTY_KEYS: Set<string> = new Set([
   // observer_turn_rollup aggregation fields:
   'total_tokens_input',
   'total_tokens_output',
+  'total_cache_hit_tokens',
+  'total_cache_miss_tokens',
   'total_cost_usd',
   'avg_duration_ms',
   'avg_compression_ms',

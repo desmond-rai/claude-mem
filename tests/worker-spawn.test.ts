@@ -55,9 +55,13 @@ describe('Worker Self-Spawn CLI', () => {
   describe('status command', () => {
     // The spawned CLI must be pointed at the isolated temp dir explicitly so
     // it never reads (or stale-cleans) the real ~/.claude-mem/worker.pid.
-    it('should report worker status in expected format', async () => {
+    it('should report a recognized worker status', async () => {
       const output = runWorkerCommand('status', { CLAUDE_MEM_DATA_DIR: TEST_DATA_DIR });
-      expect(output.includes('running')).toBe(true);
+      expect(
+        output.includes('Worker is running')
+        || output.includes('Worker is not running')
+        || /Worker port \d+ is in use but health is unreachable/.test(output),
+      ).toBe(true);
     });
 
     it('should include PID and port when running', async () => {

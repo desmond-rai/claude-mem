@@ -117,6 +117,23 @@ describe('scrubProperties', () => {
     });
   });
 
+  it('keeps numeric provider cache counters and drops unapproved cache metadata', () => {
+    const result = scrubProperties({
+      cache_hit_tokens: 2176,
+      cache_miss_tokens: 19,
+      total_cache_hit_tokens: 3900,
+      total_cache_miss_tokens: 300,
+      cache_key: 'must-not-leave-the-worker',
+    });
+
+    expect(result).toEqual({
+      cache_hit_tokens: 2176,
+      cache_miss_tokens: 19,
+      total_cache_hit_tokens: 3900,
+      total_cache_miss_tokens: 300,
+    });
+  });
+
   it('keeps the install snapshot keys with primitive values', () => {
     const result = scrubProperties({
       db_observation_count: 92501,

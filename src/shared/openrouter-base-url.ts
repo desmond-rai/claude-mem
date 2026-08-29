@@ -20,7 +20,7 @@
  *
  *   DeepSeek:
  *     CLAUDE_MEM_OPENROUTER_BASE_URL = https://api.deepseek.com
- *     CLAUDE_MEM_OPENROUTER_MODEL    = deepseek-chat
+ *     CLAUDE_MEM_OPENROUTER_MODEL    = deepseek-v4-flash
  *     OPENROUTER_API_KEY (in ~/.claude-mem/.env) = <deepseek key>
  *
  *   LM Studio (local, no key required):

@@ -41,8 +41,14 @@ export interface ActiveSession {
   respawnTimer?: ReturnType<typeof setTimeout>;
   /** When the latest compression prompt was dispatched to the model — telemetry compression_ms. */
   lastPromptSentAt?: number | null;
-  /** Real token usage and provider-reported cost from the latest model response (never estimated) — telemetry tokens_input/output/cost_usd. */
-  lastUsage?: { input: number; output: number; costUsd?: number } | null;
+  /** Real token/cache usage and provider-reported cost from the latest model response (never estimated). */
+  lastUsage?: {
+    input: number;
+    output: number;
+    costUsd?: number;
+    cacheHit?: number;
+    cacheMiss?: number;
+  } | null;
   /** What triggered the running generator ('init' | 'ingest' | 'summarize') — telemetry hook. */
   lastGeneratorSource?: string;
   /** Model id resolved when the generator started — error-path telemetry, where no response model exists. */

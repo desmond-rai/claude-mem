@@ -154,6 +154,24 @@ describe('flushSession() — observer_turn_rollup', () => {
     expect(p.obs_type_other).toBe(1);
   });
 
+  it('sums provider cache hit and miss tokens across the session', () => {
+    const SID = 71;
+    telemetryBuffer.record('session_compressed', SID, {
+      cache_hit_tokens: 2100,
+      cache_miss_tokens: 100,
+    });
+    telemetryBuffer.record('session_compressed', SID, {
+      cache_hit_tokens: 1800,
+      cache_miss_tokens: 200,
+    });
+
+    expect(telemetryBuffer.flushSession(SID, 'session_end')).toBe(true);
+    const p = (postHogCaptureCalls[0] as { properties: Record<string, unknown> }).properties;
+
+    expect(p.total_cache_hit_tokens).toBe(3900);
+    expect(p.total_cache_miss_tokens).toBe(300);
+  });
+
   it('covers all outcome buckets correctly', () => {
     const SID = 7;
     telemetryBuffer.record('session_compressed', SID, { outcome: 'ok' });

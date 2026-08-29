@@ -36,6 +36,8 @@ import { captureEvent } from './telemetry.js';
 interface SessionCompressedRecord {
   tokens_input?: number;
   tokens_output?: number;
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
   cost_usd?: number;
   duration_ms?: number;
   compression_ms?: number;
@@ -130,6 +132,8 @@ function computeSessionCompressedRollup(
 
   let totalTokensInput = 0;
   let totalTokensOutput = 0;
+  let totalCacheHitTokens = 0;
+  let totalCacheMissTokens = 0;
   let totalCostUsd = 0;
   let durationSum = 0;
   let durationCount = 0;
@@ -153,6 +157,12 @@ function computeSessionCompressedRollup(
     }
     if (typeof r.tokens_output === 'number' && Number.isFinite(r.tokens_output)) {
       totalTokensOutput += r.tokens_output;
+    }
+    if (typeof r.cache_hit_tokens === 'number' && Number.isFinite(r.cache_hit_tokens)) {
+      totalCacheHitTokens += r.cache_hit_tokens;
+    }
+    if (typeof r.cache_miss_tokens === 'number' && Number.isFinite(r.cache_miss_tokens)) {
+      totalCacheMissTokens += r.cache_miss_tokens;
     }
     if (typeof r.cost_usd === 'number' && Number.isFinite(r.cost_usd)) {
       totalCostUsd += r.cost_usd;
@@ -200,6 +210,8 @@ function computeSessionCompressedRollup(
     count,
     total_tokens_input: totalTokensInput,
     total_tokens_output: totalTokensOutput,
+    total_cache_hit_tokens: totalCacheHitTokens,
+    total_cache_miss_tokens: totalCacheMissTokens,
     total_cost_usd: totalCostUsd,
     avg_duration_ms: durationCount > 0 ? durationSum / durationCount : 0,
     avg_compression_ms: compressionCount > 0 ? compressionSum / compressionCount : 0,

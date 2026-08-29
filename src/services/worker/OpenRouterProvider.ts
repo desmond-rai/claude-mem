@@ -194,6 +194,8 @@ interface OpenRouterResponse {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
     /** Credits charged by openrouter.ai (~USD). With BYOK this is only the fee. */
     cost?: number;
     cost_details?: {
@@ -210,15 +212,35 @@ interface OpenRouterResponse {
 interface OpenRouterConfig {
   apiKey: string;
   model: string;
+  maxContextMessages: number;
   apiUrl: string;
   siteUrl?: string;
   appName?: string;
+}
+
+const DEFAULT_MAX_CONTEXT_MESSAGES = 20;
+const MIN_MAX_CONTEXT_MESSAGES = 2;
+const MAX_MAX_CONTEXT_MESSAGES = 200;
+
+function parseMaxContextMessages(value: unknown): number {
+  const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_MAX_CONTEXT_MESSAGES;
+  return Math.min(MAX_MAX_CONTEXT_MESSAGES, Math.max(MIN_MAX_CONTEXT_MESSAGES, Math.floor(parsed)));
+}
+
+function limitConversationHistory(
+  history: ConversationMessage[],
+  maxContextMessages: number,
+): ConversationMessage[] {
+  if (history.length <= maxContextMessages) return history;
+  return [history[0], ...history.slice(-(maxContextMessages - 1))];
 }
 
 export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfig> {
   protected readonly providerName = 'OpenRouter';
   protected readonly syntheticIdPrefix = 'openrouter';
   protected readonly forwardEmptyMessageResponse = true;
+  protected override readonly repairInvalidResponses: boolean = true;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     super(dbManager, sessionManager);
@@ -255,6 +277,8 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       input: result.inputTokens,
       output: result.outputTokens,
       ...(typeof result.costUsd === 'number' ? { costUsd: result.costUsd } : {}),
+      ...(typeof result.cacheHitTokens === 'number' ? { cacheHit: result.cacheHitTokens } : {}),
+      ...(typeof result.cacheMissTokens === 'number' ? { cacheMiss: result.cacheMissTokens } : {}),
     };
   }
 
@@ -266,7 +290,14 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
   }
 
   protected async query(history: ConversationMessage[], config: OpenRouterConfig): Promise<ProviderQueryResult> {
-    return this.queryOpenRouterMultiTurn(history, config.apiKey, config.model, config.apiUrl, config.siteUrl, config.appName);
+    const boundedHistory = limitConversationHistory(history, config.maxContextMessages);
+    if (boundedHistory.length !== history.length) {
+      logger.debug('SDK', 'Truncated OpenRouter conversation history', {
+        originalMessages: history.length,
+        messagesInContext: boundedHistory.length,
+      });
+    }
+    return this.queryOpenRouterMultiTurn(boundedHistory, config.apiKey, config.model, config.apiUrl, config.siteUrl, config.appName);
   }
 
   /** POST the chat-completions request. Extracted so the retry try block stays narrow. */
@@ -365,15 +396,18 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       return responseData;
     }, { label: `OpenRouter ${model}` });
 
-    if (!data.choices?.[0]?.message?.content) {
-      logger.error('SDK', 'Empty response from OpenRouter');
-      return { content: '' };
-    }
-
-    const content = data.choices[0].message.content;
+    const content = data.choices?.[0]?.message?.content ?? '';
     const tokensUsed = data.usage?.total_tokens;
     const realInputTokens = data.usage?.prompt_tokens;
     const realOutputTokens = data.usage?.completion_tokens;
+    const cacheHitTokens = typeof data.usage?.prompt_cache_hit_tokens === 'number'
+      && Number.isFinite(data.usage.prompt_cache_hit_tokens)
+      ? data.usage.prompt_cache_hit_tokens
+      : undefined;
+    const cacheMissTokens = typeof data.usage?.prompt_cache_miss_tokens === 'number'
+      && Number.isFinite(data.usage.prompt_cache_miss_tokens)
+      ? data.usage.prompt_cache_miss_tokens
+      : undefined;
     // usage.cost is what openrouter.ai charged in credits (~USD); with BYOK the
     // model spend is reported separately as upstream_inference_cost. Custom
     // gateways usually omit both — costUsd stays undefined (never estimated).
@@ -392,6 +426,8 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
         inputTokens: realInputTokens || 0,
         outputTokens: realOutputTokens || 0,
         totalTokens: tokensUsed,
+        ...(cacheHitTokens !== undefined ? { cacheHitTokens } : {}),
+        ...(cacheMissTokens !== undefined ? { cacheMissTokens } : {}),
         ...(costUsd !== undefined ? { costUSD: costUsd.toFixed(6) } : {}),
         messagesInContext: history.length
       });
@@ -404,7 +440,20 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       }
     }
 
-    return { content, tokensUsed, inputTokens: realInputTokens, outputTokens: realOutputTokens, costUsd, servedModel };
+    if (!content) {
+      logger.error('SDK', 'Empty response from OpenRouter');
+    }
+
+    return {
+      content,
+      tokensUsed,
+      inputTokens: realInputTokens,
+      outputTokens: realOutputTokens,
+      costUsd,
+      servedModel,
+      ...(cacheHitTokens !== undefined ? { cacheHitTokens } : {}),
+      ...(cacheMissTokens !== undefined ? { cacheMissTokens } : {}),
+    };
   }
 
   private getOpenRouterConfig(): OpenRouterConfig {
@@ -432,8 +481,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
 
     const siteUrl = settings.CLAUDE_MEM_OPENROUTER_SITE_URL || '';
     const appName = settings.CLAUDE_MEM_OPENROUTER_APP_NAME || OPENROUTER_APP_TITLE;
+    const maxContextMessages = parseMaxContextMessages(settings.CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES);
 
-    return { apiKey, model, apiUrl, siteUrl, appName };
+    return { apiKey, model, maxContextMessages, apiUrl, siteUrl, appName };
   }
 }
 
